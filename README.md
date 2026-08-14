@@ -30,3 +30,5 @@ No pip packages required.
 2. Open the page
 3. Enter Zoho Mail address + App-Specific Password
 4. Click **Connect and compare filenames**
+
+Sample `.eml` files are available as download buttons on the page.

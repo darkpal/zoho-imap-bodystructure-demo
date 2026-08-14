@@ -15,8 +15,11 @@ import html
 import imaplib
 import os
 import re
+import secrets
 import ssl
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
@@ -28,10 +31,20 @@ SOURCE_URL = os.environ.get(
     "SOURCE_URL",
     "https://github.com/darkpal/zoho-imap-bodystructure-demo",
 )
+BASE_DIR = Path(__file__).resolve().parent
+SAMPLES_DIR = BASE_DIR / "samples"
+ALLOWED_EML = {
+    "test-a-zoho-web.eml": "Test A — Zoho Web sent",
+    "test-c-gmail-to-zoho.eml": "Test C — Gmail received in Zoho",
+    "test-b-gmail-outbox-working.eml": "Test B — Gmail outbox (working reference)",
+}
+LIVE_EML: dict[str, tuple[float, bytes, str]] = {}
+LIVE_EML_TTL = 15 * 60
 
 STATIC_CASES = [
     {
         "title": "Test A — sent from Zoho Web",
+        "eml": "test-a-zoho-web.eml",
         "headers": (
             "Date: Wed, 22 Jul 2026 11:00:07 +0300\n"
             "Message-Id: <redacted@example.com>\n"
@@ -60,6 +73,7 @@ STATIC_CASES = [
     },
     {
         "title": "Test C — sent from Gmail, received in Zoho",
+        "eml": "test-c-gmail-to-zoho.eml",
         "headers": (
             "Date: Wed, 22 Jul 2026 10:59:33 +0300\n"
             "Message-ID: <redacted@mail.gmail.com>\n"
@@ -178,6 +192,16 @@ def fetch_live(user: str, password: str, host: str, subject: str) -> dict:
         mime_ok = (b"=?UTF-8?" in mime.upper()) or (b"utf8''" in mime.lower())
         bug = any(r["bad"] for r in rows) and mime_ok
 
+        eml_token = ""
+        typ, rfc = conn.fetch(seq, "(RFC822)")
+        if typ == "OK" and rfc and isinstance(rfc[0], tuple) and isinstance(rfc[0][1], bytes):
+            now = time.time()
+            for old_token, (ts, _, _) in list(LIVE_EML.items()):
+                if now - ts > LIVE_EML_TTL:
+                    LIVE_EML.pop(old_token, None)
+            eml_token = secrets.token_urlsafe(16)
+            LIVE_EML[eml_token] = (now, rfc[0][1], "live-check.eml")
+
         return {
             "ok": True,
             "host": host,
@@ -188,6 +212,7 @@ def fetch_live(user: str, password: str, host: str, subject: str) -> dict:
             "mime_lines": mime_lines,
             "mime_ok": mime_ok,
             "bug": bug,
+            "eml_token": eml_token,
         }
     except imaplib.IMAP4.error as e:
         return {"ok": False, "error": f"IMAP error: {e}"}
@@ -221,9 +246,16 @@ def page(live_result: dict | None = None, form: dict | None = None) -> str:
     cases_html = ""
     for case in STATIC_CASES:
         mime_block = "\n".join(html.escape(x) for x in case["mime_lines"])
+        eml_name = case.get("eml", "")
+        eml_btn = (
+            f'<p><a class="btn secondary" href="/samples/{html.escape(eml_name)}">Download this .eml</a></p>'
+            if eml_name
+            else ""
+        )
         cases_html += f"""
         <section class="panel">
           <h2>{html.escape(case['title'])}</h2>
+          {eml_btn}
           <pre>{html.escape(case['headers'])}</pre>
           <div class="grid">{render_cards(case['rows'])}</div>
           <h3>Same message — BODY[2.MIME]</h3>
@@ -249,6 +281,7 @@ def page(live_result: dict | None = None, form: dict | None = None) -> str:
               <div class="grid">{render_cards(live_result['rows'])}</div>
               <h3>BODY[2.MIME]</h3>
               <pre>{mime_block}</pre>
+              {f'<p><a class="btn" href="/live-eml/{html.escape(live_result["eml_token"])}">Download this live message as .eml</a></p>' if live_result.get("eml_token") else ""}
             </section>"""
         else:
             live_block = f'<div class="verdict bad"><strong>Live error:</strong> {html.escape(live_result.get("error",""))}</div>'
@@ -344,6 +377,16 @@ def page(live_result: dict | None = None, form: dict | None = None) -> str:
     </form>
   </section>
 
+  <section class="panel">
+    <h2>Download sample .eml files</h2>
+    <p class="meta">Raw messages used in the captured tests below. Open them in any email client or a text editor.</p>
+    <div class="actions">
+      <a class="btn secondary" href="/samples/test-a-zoho-web.eml">Test A — Zoho Web .eml</a>
+      <a class="btn secondary" href="/samples/test-c-gmail-to-zoho.eml">Test C — Gmail → Zoho .eml</a>
+      <a class="btn secondary" href="/samples/test-b-gmail-outbox-working.eml">Test B — Gmail outbox (working) .eml</a>
+    </div>
+  </section>
+
   {live_block}
 
   <div class="verdict bad">
@@ -388,12 +431,44 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_bytes(self, code: int, data: bytes, content_type: str, filename: str | None = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, page())
         elif path == "/health":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
+        elif path.startswith("/samples/"):
+            name = path.rsplit("/", 1)[-1]
+            if name not in ALLOWED_EML:
+                self._send(404, "Not found\n", "text/plain; charset=utf-8")
+                return
+            file_path = SAMPLES_DIR / name
+            if not file_path.is_file():
+                self._send(404, "Not found\n", "text/plain; charset=utf-8")
+                return
+            self._send_bytes(200, file_path.read_bytes(), "message/rfc822", name)
+        elif path.startswith("/live-eml/"):
+            token = path.rsplit("/", 1)[-1]
+            item = LIVE_EML.get(token)
+            if not item:
+                self._send(404, "Download expired. Run the live check again.\n", "text/plain; charset=utf-8")
+                return
+            ts, data, filename = item
+            if time.time() - ts > LIVE_EML_TTL:
+                LIVE_EML.pop(token, None)
+                self._send(404, "Download expired. Run the live check again.\n", "text/plain; charset=utf-8")
+                return
+            self._send_bytes(200, data, "message/rfc822", filename)
         else:
             self._send(404, "Not found\n", "text/plain; charset=utf-8")
 
