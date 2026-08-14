@@ -19,7 +19,6 @@ import secrets
 import ssl
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
@@ -31,20 +30,12 @@ SOURCE_URL = os.environ.get(
     "SOURCE_URL",
     "https://github.com/darkpal/zoho-imap-bodystructure-demo",
 )
-BASE_DIR = Path(__file__).resolve().parent
-SAMPLES_DIR = BASE_DIR / "samples"
-ALLOWED_EML = {
-    "test-a-zoho-web.eml": "Test A — Zoho Web sent",
-    "test-c-gmail-to-zoho.eml": "Test C — Gmail received in Zoho",
-    "test-b-gmail-outbox-working.eml": "Test B — Gmail outbox (working reference)",
-}
 LIVE_EML: dict[str, tuple[float, bytes, str]] = {}
 LIVE_EML_TTL = 15 * 60
 
 STATIC_CASES = [
     {
         "title": "Test A — sent from Zoho Web",
-        "eml": "test-a-zoho-web.eml",
         "headers": (
             "Date: Wed, 22 Jul 2026 11:00:07 +0300\n"
             "Message-Id: <redacted@example.com>\n"
@@ -73,7 +64,6 @@ STATIC_CASES = [
     },
     {
         "title": "Test C — sent from Gmail, received in Zoho",
-        "eml": "test-c-gmail-to-zoho.eml",
         "headers": (
             "Date: Wed, 22 Jul 2026 10:59:33 +0300\n"
             "Message-ID: <redacted@mail.gmail.com>\n"
@@ -246,16 +236,9 @@ def page(live_result: dict | None = None, form: dict | None = None) -> str:
     cases_html = ""
     for case in STATIC_CASES:
         mime_block = "\n".join(html.escape(x) for x in case["mime_lines"])
-        eml_name = case.get("eml", "")
-        eml_btn = (
-            f'<p><a class="btn secondary" href="/samples/{html.escape(eml_name)}">Download this .eml</a></p>'
-            if eml_name
-            else ""
-        )
         cases_html += f"""
         <section class="panel">
           <h2>{html.escape(case['title'])}</h2>
-          {eml_btn}
           <pre>{html.escape(case['headers'])}</pre>
           <div class="grid">{render_cards(case['rows'])}</div>
           <h3>Same message — BODY[2.MIME]</h3>
@@ -377,16 +360,6 @@ def page(live_result: dict | None = None, form: dict | None = None) -> str:
     </form>
   </section>
 
-  <section class="panel">
-    <h2>Download sample .eml files</h2>
-    <p class="meta">Raw messages used in the captured tests below. Open them in any email client or a text editor.</p>
-    <div class="actions">
-      <a class="btn secondary" href="/samples/test-a-zoho-web.eml">Test A — Zoho Web .eml</a>
-      <a class="btn secondary" href="/samples/test-c-gmail-to-zoho.eml">Test C — Gmail → Zoho .eml</a>
-      <a class="btn secondary" href="/samples/test-b-gmail-outbox-working.eml">Test B — Gmail outbox (working) .eml</a>
-    </div>
-  </section>
-
   {live_block}
 
   <div class="verdict bad">
@@ -447,16 +420,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, page())
         elif path == "/health":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path.startswith("/samples/"):
-            name = path.rsplit("/", 1)[-1]
-            if name not in ALLOWED_EML:
-                self._send(404, "Not found\n", "text/plain; charset=utf-8")
-                return
-            file_path = SAMPLES_DIR / name
-            if not file_path.is_file():
-                self._send(404, "Not found\n", "text/plain; charset=utf-8")
-                return
-            self._send_bytes(200, file_path.read_bytes(), "message/rfc822", name)
         elif path.startswith("/live-eml/"):
             token = path.rsplit("/", 1)[-1]
             item = LIVE_EML.get(token)
