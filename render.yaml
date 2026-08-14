@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: zoho-imap-bodystructure-demo
+    runtime: python
+    plan: free
+    buildCommand: "true"
+    startCommand: python3 app.py
